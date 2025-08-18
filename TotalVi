@@ -1,0 +1,77 @@
+import pandas as pd
+import anndata
+import scvi
+
+# Load raw RNA counts (genes x cells)
+rna_counts = pd.read_csv("cite_mRNA_raw_counts.csv", index_col=0)
+# Load protein counts (cells x proteins)
+protein_counts = pd.read_csv("cite_protein_counts.csv", index_col=0)
+
+# Check dimensions and matching cells
+print(rna_counts.shape, protein_counts.shape)
+assert all(rna_counts.columns == protein_counts.index), "Cells must match between RNA and protein!"
+
+# Transpose RNA counts to cells x genes (anndata expects cells as rows)
+rna_counts = rna_counts.T
+
+# Create AnnData object with RNA counts
+adata = anndata.AnnData(X=rna_counts)
+
+# Add protein counts as an additional layer or modality
+# scvi-tools expects a modality called 'protein_expression' in .obsm or .layers, but for totalVI integration:
+# Put protein counts in .obsm as a separate modality
+adata.obsm["protein_expression"] = protein_counts.loc[adata.obs_names].values
+
+# Setup AnnData for totalVI (multi-omic model for RNA + ADT)
+scvi.model.TOTALVI.setup_anndata(adata, protein_expression_obsm_key="protein_expression")
+
+# Create and train totalVI model
+model = scvi.model.TOTALVI(adata)
+model.train(max_epochs=400, lr=1e-3)
+
+# Extract latent representation
+latent = model.get_latent_representation()
+
+print(latent.shape)  # cells x latent dims
+
+# Save latent representation for downstream analysis
+pd.DataFrame(latent, index=adata.obs_names).to_csv("totalvi_latent.csv")
+
+import pandas as pd
+import anndata
+import scvi
+import torch
+
+# Optional: Ensure tensors default to CPU
+torch.set_default_device("cpu")
+
+# Load RNA and protein
+rna_counts = pd.read_csv("cite_mRNA_raw_counts.csv", index_col=0).T
+protein_counts = pd.read_csv("cite_protein_counts.csv", index_col=0)
+
+# Create AnnData
+adata = anndata.AnnData(X=rna_counts)
+adata.obsm["protein_expression"] = protein_counts.loc[adata.obs_names].values
+
+# Setup totalVI
+scvi.model.TOTALVI.setup_anndata(adata, protein_expression_obsm_key="protein_expression")
+
+# Train model (CPU only)
+model = scvi.model.TOTALVI(adata)
+model.train(
+    max_epochs=400,
+    lr=1e-3,
+    accelerator="cpu",
+    devices=1
+)
+
+# Extract denoised protein matrix
+_, protein_denoised = model.get_normalized_expression(
+    library_size="protein",
+    return_mean=True,
+    include_protein_background=True,
+    sample_protein_mixing=False
+)
+
+# Save output
+protein_denoised.to_csv("cite_denoised_protein.csv")
